@@ -6,3 +6,4 @@ langchain-huggingface
 langchain-chroma
 chromadb
 sentence-transformers
+google-genai
