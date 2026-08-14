@@ -167,13 +167,25 @@ def load_vectorstore():
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
+    # If vectorstore does not exist, create it automatically
+    if not os.path.exists("vectorstore"):
+        
+        st.info("📚 Preparing Defence knowledge base...")
+
+        import subprocess
+        import sys
+
+        subprocess.run(
+            [sys.executable, "ingest.py"],
+            check=True
+        )
+
     vectorstore = Chroma(
         persist_directory="vectorstore",
         embedding_function=embeddings
     )
 
     return vectorstore
-
 
 # ============================================================
 # LOAD SYSTEMS
