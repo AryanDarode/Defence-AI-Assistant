@@ -1,3 +1,4 @@
+streamlit
 python-dotenv
 langchain
 langchain-community
@@ -6,4 +7,9 @@ langchain-huggingface
 langchain-chroma
 chromadb
 sentence-transformers
+torch
+torchvision
 google-genai
+pypdf
+pandas
+numpy
