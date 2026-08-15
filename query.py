@@ -1,4 +1,6 @@
 import os
+import re
+
 from dotenv import load_dotenv
 
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -7,34 +9,53 @@ from langchain_chroma import Chroma
 from google import genai
 
 
-# ==============================
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+VECTORSTORE_PATH = "vectorstore"
+
+TOP_K = 15
+
+
+# ============================================================
 # LOAD ENVIRONMENT
-# ==============================
+# ============================================================
 
 load_dotenv()
 
 api_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
+
     print("ERROR: GEMINI_API_KEY not found")
+
     exit()
 
-client = genai.Client(api_key=api_key)
+
+client = genai.Client(
+    api_key=api_key
+)
 
 print("Gemini connected.")
 
 
-# ==============================
-# LOAD VECTOR DATABASE
-# ==============================
+# ============================================================
+# LOAD EMBEDDING MODEL
+# ============================================================
 
-VECTORSTORE_PATH = "vectorstore"
-
-print("Loading vector database...")
+print("\nLoading embedding model...")
 
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
+
+
+# ============================================================
+# LOAD CHROMA
+# ============================================================
+
+print("Loading Chroma vector database...")
 
 vectorstore = Chroma(
     persist_directory=VECTORSTORE_PATH,
@@ -44,127 +65,292 @@ vectorstore = Chroma(
 print("Vector database loaded.")
 
 
-# ==============================
-# ASK QUESTION
-# ==============================
+# ============================================================
+# KEYWORD SCORING
+# ============================================================
 
-question = input("\nAsk a question about Defence: ")
+def keyword_score(question, text):
+
+    question_lower = question.lower()
+
+    text_lower = text.lower()
+
+    score = 0
 
 
-# ==============================
+    # Important phrases
+
+    important_phrases = [
+
+        "dual thrust",
+
+        "edb",
+
+        "propellant",
+
+        "solid propellant",
+
+        "rocket motor",
+
+        "double base",
+
+        "propulsion"
+
+    ]
+
+
+    for phrase in important_phrases:
+
+        if phrase in question_lower:
+
+            if phrase in text_lower:
+
+                score += 10
+
+
+    # Individual words
+
+    words = re.findall(
+        r"\b[a-zA-Z0-9]+\b",
+        question_lower
+    )
+
+
+    for word in words:
+
+        if len(word) > 2:
+
+            if word in text_lower:
+
+                score += 1
+
+
+    return score
+
+
+# ============================================================
 # RETRIEVAL
-# ==============================
+# ============================================================
 
-results_with_scores = vectorstore.similarity_search_with_score(
-    question,
-    k=8
-)
+def retrieve_documents(question):
 
-MAX_DISTANCE = 0.95
+    # Semantic retrieval
 
-results = []
+    semantic_results = vectorstore.similarity_search(
+        question,
+        k=TOP_K
+    )
 
-for doc, score in results_with_scores:
 
-    if score <= MAX_DISTANCE:
-        results.append(doc)
+    scored_results = []
 
-if not results:
-    print("\nI could not find relevant information in the provided Defence dataset.")
-    exit()
-# ==============================
-# BUILD CONTEXT
-# ==============================
 
-context = ""
+    for doc in semantic_results:
 
-for i, doc in enumerate(results):
+        score = keyword_score(
+            question,
+            doc.page_content
+        )
 
-    source = doc.metadata.get("source", "Unknown source")
 
-    context += f"""
-SOURCE {i + 1}:
-{source}
+        scored_results.append(
+            (score, doc)
+        )
+
+
+    # Highest keyword relevance first
+
+    scored_results.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+
+    return [
+        doc
+        for score, doc in scored_results[:8]
+    ]
+
+
+# ============================================================
+# GENERATE ANSWER
+# ============================================================
+
+def generate_answer(question):
+
+    print("\nSearching DRDO knowledge base...")
+
+    results = retrieve_documents(question)
+
+
+    if not results:
+
+        return (
+            "I could not find sufficient information "
+            "in the provided DRDO documents.",
+            []
+        )
+
+
+    # ========================================================
+    # BUILD CONTEXT
+    # ========================================================
+
+    context = ""
+
+
+    for i, doc in enumerate(results):
+
+        context += f"""
+
+================ DOCUMENT {i + 1} ================
+
+SOURCE:
+{doc.metadata.get("source", "DRDO document")}
 
 CONTENT:
+
 {doc.page_content}
 
--------------------------
+====================================================
 """
 
 
-# ==============================
-# GEMINI PROMPT
-# ==============================
+    # ========================================================
+    # GEMINI PROMPT
+    # ========================================================
 
-prompt = f"""
-You are a Defence-domain AI assistant.
+    prompt = f"""
 
-Your task is to answer the user's question using ONLY
-the retrieved information from the provided Defence dataset.
+You are a DRDO Defence Information Assistant.
 
-STRICT RULES:
+Your job is to answer the user's question using ONLY
+the information contained in the retrieved DRDO documents.
 
-1. Do not use outside knowledge.
-2. Do not invent or assume facts.
-3. If the retrieved documents do not contain enough
-   information to answer the question, say:
+IMPORTANT RULES:
 
-   "I could not find sufficient information in the
-   provided Defence dataset."
+1. Do NOT use outside knowledge.
 
-4. Give a concise and factual answer.
-5. Base every important claim on the retrieved documents.
+2. Do NOT invent facts.
+
+3. Do NOT assume that an abbreviation means something
+   unless the retrieved documents explicitly establish it.
+
+4. If the documents contain related information but
+   do not completely answer the question, clearly explain
+   what IS available and what is NOT available.
+
+5. Never hallucinate.
+
+6. Give a concise and easy-to-understand answer.
+
+7. Mention the relevant DRDO system/product when possible.
+
+8. If appropriate, mention the page number shown in
+   the retrieved content.
 
 USER QUESTION:
+
 {question}
 
-RETRIEVED DEFENCE DOCUMENTS:
+
+RETRIEVED DRDO DOCUMENTS:
 
 {context}
+
+
+ANSWER:
 """
 
 
-# ==============================
-# GENERATE ANSWER
-# ==============================
+    # ========================================================
+    # GEMINI
+    # ========================================================
 
-print("\nGenerating answer...")
+    response = client.models.generate_content(
 
-response = client.models.generate_content(
-    model="gemini-3.6-flash",
-    contents=prompt
+        model="gemini-3.6-flash",
+
+        contents=prompt
+    )
+
+
+    return response.text, results
+
+
+# ============================================================
+# CHATBOT
+# ============================================================
+
+print("\n")
+print("=" * 60)
+print("              DRDO DEFENCE AI")
+print("=" * 60)
+
+print(
+    "Ask questions about the available DRDO documents."
 )
 
+print(
+    "Type 'exit' to stop."
+)
 
-# ==============================
-# DISPLAY ANSWER
-# ==============================
-
-print("\n")
-print("=" * 45)
-print("          DEFENCE AI ASSISTANT")
-print("=" * 45)
-
-print("\nANSWER:")
-print(response.text)
+print("=" * 60)
 
 
-# ==============================
-# SOURCES
-# ==============================
+while True:
 
-print("\n")
-print("=" * 45)
-print("              SOURCES")
-print("=" * 45)
+    question = input("\nYou: ").strip()
 
-seen = set()
 
-for doc in results:
+    if not question:
 
-    source = doc.metadata.get("source", "Unknown")
+        continue
 
-    if source not in seen:
-        print("•", source)
-        seen.add(source)
+
+    if question.lower() == "exit":
+
+        print("\nChatbot stopped.")
+
+        break
+
+
+    answer, results = generate_answer(
+        question
+    )
+
+
+    # ========================================================
+    # ANSWER
+    # ========================================================
+
+    print("\nDRDO Assistant:")
+    print(answer)
+
+
+    # ========================================================
+    # SOURCES
+    # ========================================================
+
+    print("\nSources:")
+
+
+    seen = set()
+
+
+    for doc in results:
+
+        source = doc.metadata.get(
+            "source",
+            "DRDO document"
+        )
+
+
+        if source not in seen:
+
+            print("•", source)
+
+            seen.add(source)
+
+
+    print("\n" + "=" * 60)
